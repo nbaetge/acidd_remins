@@ -1,0 +1,286 @@
+---
+title: "Combined_BactAbund"
+author: "Nicholas Baetge"
+date: "6/21/2021"
+output: github_document
+---
+
+# Intro 
+
+This document shows how **individual bottle**  bacterial abundance data from ACIDD experiments were processed, QC'd, and analyzed. 
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(readxl)
+library(lubridate)
+library(ggpubr)
+```
+
+# Import data
+
+```{r}
+excel_sheets("~/GITHUB/acidd_remins/input/ACIDD_Exp_BactAbund.xlsx")
+
+acidd_metadata <- read_excel("~/GITHUB/acidd_remins/input/ACIDD_Exp_BactAbund.xlsx", sheet = "Metadata")
+glimpse(acidd_metadata)
+# unique(metadata$Experiment)
+# unique(metadata$Location)
+# unique(metadata$Bottle)
+# unique(metadata$Treatment)
+
+acidd_data <- read_excel("~/GITHUB/acidd_remins/input/ACIDD_Exp_BactAbund.xlsx", sheet = "Data")
+glimpse(acidd_data)
+
+acidd_joined <- left_join(acidd_metadata, acidd_data)
+# names(joined)
+# summary(joined)
+glimpse(acidd_joined)
+
+####
+
+class_metadata <- read_excel("~/GITHUB/acidd_remins/input/144L_2018_BactAbund.xlsx", sheet = "Metadata")
+
+class_data <- read_excel("~/GITHUB/acidd_remins/input/144L_2018_BactAbund.xlsx", sheet = "Data")
+
+class_joined <- left_join(class_metadata, class_data)
+
+###
+
+mud_data <- read_excel("~/GITHUB/acidd_remins/input/Mud191_BactAbund.xlsx", sheet = "Sheet1") %>% 
+  group_by(Bottle, Timepoint) %>% 
+  mutate(mean = mean(Cells_ml, na.rm = T),
+         Cells_ml_sd = sd(Cells_ml, na.rm = T)) %>% 
+  select(-Cells_ml) %>% 
+  distinct() %>% 
+  rename(Cells_ml = mean)
+
+
+combined_data <- full_join(acidd_joined, class_joined) %>% 
+  full_join(., mud_data)
+
+glimpse(combined_data)
+
+
+
+
+
+```
+
+# Prepare data
+
+Convert date and time column values from characters to dates, add columns with time elapsed for each experiment, and convert cells/ml to cells/l, subset data to select only VOI & drop na's
+
+```{r message=FALSE, warning=FALSE}
+cells <- combined_data %>% 
+  mutate(Datetime = ymd_hm(Datetime),
+         cells = Cells_ml * 1000,
+         sd_cells = Cells_ml_sd * 1000) %>%
+  group_by(Experiment, Treatment, Bottle) %>% 
+  mutate(interv = interval(first(Datetime), Datetime),
+         hours = as.numeric(interv/3600),
+         days = hours/24) %>% 
+  ungroup() %>% 
+  select(Experiment:DNA_SampleID, hours, days, cells, sd_cells) %>% 
+  drop_na(cells)
+
+glimpse(cells)
+  
+```
+
+# Plot growth curves
+
+```{r fig.height=4, fig.width=12}
+# custom.colors <- c("Control" = "#377EB8", "Ash Leachate" = "#4DAF4A", "Santa Barbara" = "#E41A1C", "San Diego" = "#FF7F00")
+levels <- c("Control", "Ash Leachate", "Mud Leachate", "UV-Mud Leachate", "Glucose_Nitrate_Phosphate", "San Diego", "Santa Barbara", "Campus Point", "Goleta Beach")
+
+custom.colors <- c("Control" = "#377EB8", "Ash Leachate" = "#4DAF4A", "Mud Leachate" = "#E41A1C", "UV-Mud Leachate" = "#FF7F00", "Glucose_Nitrate_Phosphate" = "#313695", "Santa Barbara" = "#E41A1C", "San Diego" = "#FF7F00")
+
+ba_curves <- cells %>% 
+  filter(!Treatment == "Amendment") %>% 
+  # mutate(dna = ifelse(DNA_Sample == T, "*", NA)) %>% 
+  ggplot(aes(x = days, y = cells, group = interaction(Experiment, Treatment, Bottle))) +
+  geom_errorbar(aes(ymin = cells - sd_cells, ymax = cells + sd_cells, color = factor(Treatment, levels = levels)), width = 0.1) +
+  geom_line(aes(color = factor(Treatment, levels = levels)), size = 1, alpha = 0.7) +
+  geom_point(aes(fill = factor(Treatment, levels = levels)), size = 3, color = "black", shape = 21) +
+  # geom_text(aes(label = dna), size = 12,  color = "#E41A1C") +
+  labs(x = "Days", y = expression(paste("Bacterioplankton Abundance, Cells L"^-1)), fill = "") +
+  guides(color = F) +
+  scale_color_manual(values = custom.colors) +
+  scale_fill_manual(values = custom.colors) +
+  facet_grid(~factor(Location, levels = levels), scales = "free") +
+  theme_classic2()  
+
+
+
+```
+
+
+```{r fig.height=4, fig.width=12}
+# custom.colors <- c("Control" = "#377EB8", "Ash Leachate" = "#4DAF4A", "Santa Barbara" = "#E41A1C", "San Diego" = "#FF7F00")
+
+ba_curves_mean <- cells %>% 
+  filter(!Treatment == "Amendment") %>% 
+  group_by(Experiment, Treatment, Timepoint) %>% 
+  mutate(mean = mean(cells, na.rm = T),
+         sd = sd(cells, na.rm = T)) %>% 
+  ungroup() %>% 
+  select(-c(cells, sd_cells)) %>% 
+  distinct() %>% 
+  ggplot(aes(x = days, y = mean, group = interaction(Experiment, Treatment, Bottle))) +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd, color = factor(Treatment, levels = levels)), width = 0.1) +
+  geom_line(aes(color = factor(Treatment, levels = levels)), size = 1, alpha = 0.7) +
+  geom_point(aes(fill = factor(Treatment, levels = levels)), size = 3, color = "black", shape = 21) +
+  # geom_text(aes(label = dna), size = 12,  color = "#E41A1C") +
+  labs(x = "Days", y = expression(paste("Bacterioplankton Abundance, Cells L"^-1)), fill = "") +
+  guides(color = F) +
+  scale_color_manual(values = custom.colors) +
+  scale_fill_manual(values = custom.colors) +
+  facet_grid(~factor(Location, levels = levels), scales = "free") +
+  theme_classic2()  
+
+
+
+```
+
+
+```{r fig.height=4, fig.width=6}
+# custom.colors <- c("Control" = "#377EB8", "Ash Leachate" = "#4DAF4A", "Santa Barbara" = "#E41A1C", "San Diego" = "#FF7F00")
+
+sd_ba_curves <- cells %>% 
+  filter(!Treatment == "Amendment", Location == "San Diego") %>% 
+  group_by(Experiment, Treatment, Timepoint) %>% 
+  mutate(mean = mean(cells, na.rm = T),
+         sd = sd(cells, na.rm = T)) %>% 
+  ungroup() %>% 
+  select(-c(cells, sd_cells)) %>% 
+  distinct() %>% 
+  ggplot(aes(x = days, y = mean, group = interaction(Experiment, Treatment, Bottle))) +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd, color = factor(Treatment, levels = levels)), width = 0.1) +
+  geom_line(aes(color = factor(Treatment, levels = levels)), size = 1, alpha = 0.7) +
+  geom_point(aes(fill = factor(Treatment, levels = levels)), size = 3, color = "black", shape = 21) +
+  # geom_text(aes(label = dna), size = 12,  color = "#E41A1C") +
+  labs(x = "Days", y = expression(paste("Bacterioplankton Abundance, Cells L"^-1)), fill = "") +
+  guides(color = F) +
+  scale_color_manual(values = custom.colors) +
+  scale_fill_manual(values = custom.colors) +
+  theme_classic2()  
+
+
+
+```
+
+```{r fig.height=4, fig.width=6}
+# custom.colors <- c("Control" = "#377EB8", "Ash Leachate" = "#4DAF4A", "Santa Barbara" = "#E41A1C", "San Diego" = "#FF7F00")
+
+sb_ba_curves <- cells %>% 
+  filter(!Treatment == "Amendment", Location == "Santa Barbara") %>% 
+  group_by(Experiment, Treatment, Timepoint) %>% 
+  mutate(mean = mean(cells, na.rm = T),
+         sd = sd(cells, na.rm = T)) %>% 
+  ungroup() %>% 
+  select(-c(cells, sd_cells)) %>% 
+  distinct() %>% 
+  ggplot(aes(x = days, y = mean, group = interaction(Experiment, Treatment, Bottle))) +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd, color = factor(Treatment, levels = levels)), width = 0.1) +
+  geom_line(aes(color = factor(Treatment, levels = levels)), size = 1, alpha = 0.7) +
+  geom_point(aes(fill = factor(Treatment, levels = levels)), size = 3, color = "black", shape = 21) +
+  # geom_text(aes(label = dna), size = 12,  color = "#E41A1C") +
+  labs(x = "Days", y = expression(paste("Bacterioplankton Abundance, Cells L"^-1)), fill = "") +
+  guides(color = F) +
+  scale_color_manual(values = custom.colors) +
+  scale_fill_manual(values = custom.colors) +
+  theme_classic2()  
+
+
+
+```
+
+
+```{r fig.height=4, fig.width=8}
+# custom.colors <- c("Control" = "#377EB8", "Ash Leachate" = "#4DAF4A", "Santa Barbara" = "#E41A1C", "San Diego" = "#FF7F00")
+
+cp_ba_curves <- cells %>% 
+  filter(!Treatment == "Amendment", Location == "Campus Point") %>% 
+  group_by(Experiment, Treatment, Timepoint) %>% 
+  mutate(mean = mean(cells, na.rm = T),
+         sd = sd(cells, na.rm = T)) %>% 
+  ungroup() %>% 
+  select(-c(cells, sd_cells)) %>% 
+  distinct() %>% 
+  ggplot(aes(x = days, y = mean, group = interaction(Experiment, Treatment, Bottle))) +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd, color = factor(Treatment, levels = levels)), width = 0.1) +
+  geom_line(aes(color = factor(Treatment, levels = levels)), size = 1, alpha = 0.7) +
+  geom_point(aes(fill = factor(Treatment, levels = levels)), size = 3, color = "black", shape = 21) +
+  # geom_text(aes(label = dna), size = 12,  color = "#E41A1C") +
+  labs(x = "Days", y = expression(paste("Bacterioplankton Abundance, Cells L"^-1)), fill = "") +
+  guides(color = F) +
+  scale_color_manual(values = custom.colors) +
+  scale_fill_manual(values = custom.colors) +
+  theme_classic2()  
+
+
+
+```
+
+```{r fig.height=4, fig.width=8}
+# custom.colors <- c("Control" = "#377EB8", "Ash Leachate" = "#4DAF4A", "Santa Barbara" = "#E41A1C", "San Diego" = "#FF7F00")
+
+gb_ba_curves <- cells %>% 
+  filter(!Treatment == "Amendment", Location == "Goleta Beach") %>% 
+  group_by(Experiment, Treatment, Timepoint) %>% 
+  mutate(mean = mean(cells, na.rm = T),
+         sd = sd(cells, na.rm = T)) %>% 
+  ungroup() %>% 
+  select(-c(cells, sd_cells)) %>% 
+  distinct() %>% 
+  ggplot(aes(x = days, y = mean, group = interaction(Experiment, Treatment, Bottle))) +
+  geom_errorbar(aes(ymin = mean - sd, ymax = mean + sd, color = factor(Treatment, levels = levels)), width = 0.1) +
+  geom_line(aes(color = factor(Treatment, levels = levels)), size = 1, alpha = 0.7) +
+  geom_point(aes(fill = factor(Treatment, levels = levels)), size = 3, color = "black", shape = 21) +
+  # geom_text(aes(label = dna), size = 12,  color = "#E41A1C") +
+  labs(x = "Days", y = expression(paste("Bacterioplankton Abundance, Cells L"^-1)), fill = "") +
+  guides(color = F) +
+  scale_color_manual(values = custom.colors) +
+  scale_fill_manual(values = custom.colors) +
+  theme_classic2()  
+
+
+
+```
+
+
+
+```{r}
+saveRDS(ba_curves, "~/GITHUB/acidd_remins/output/ba_curves.rds")
+saveRDS(ba_curves_mean, "~/GITHUB/acidd_remins/output/ba_curves_mean.rds")
+saveRDS(sd_ba_curves, "~/GITHUB/acidd_remins/output/sd_ba_curves.rds")
+saveRDS(sb_ba_curves, "~/GITHUB/acidd_remins/output/sb_ba_curves.rds")
+saveRDS(cp_ba_curves, "~/GITHUB/acidd_remins/output/cp_ba_curves.rds")
+saveRDS(gb_ba_curves, "~/GITHUB/acidd_remins/output/gb_ba_curves.rds")
+
+saveRDS(cells, "~/GITHUB/acidd_remins/input/tidy_BactA_Remin_Master.rds")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

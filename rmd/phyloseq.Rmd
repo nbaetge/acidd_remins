@@ -1,0 +1,554 @@
+---
+title: "Phyloseq"
+author: "Nicholas Baetge"
+date: "10/31/2020"
+output: github_document
+---
+
+# Intro
+
+We explore the processed ACIDD 16S sequences using [phyloseq](https://joey711.github.io/phyloseq/)
+
+# Install phyloseq
+
+```{r}
+# BiocManager::install("phyloseq")
+```
+
+
+```{r message = F, warning = F}
+library(tidyverse) 
+library(phyloseq)
+library(RColorBrewer)
+library(ggpubr)
+library(viridis)
+```
+
+# Import Data 
+
+```{r message = F}
+count.tab <- read_rds("~/GITHUB/acidd_remins/output/seqtab-nochimtaxa.rds") #table of counts for each sequence in each sample
+tax.tab <- read_rds("~/GITHUB/acidd_remins/output/taxa.rds") #table that matches ASV to sequence
+sample.tab <- read_rds("~/GITHUB/acidd_remins/input/tidy_combined_data.rds") %>% 
+  drop_na(DNA_SampleID) %>% 
+  column_to_rownames(var = "DNA_SampleID") 
+```
+
+# Phyloseq Object
+
+We need to create a phyloseq object that merges all three datasets. Sometimes this doesn't work beacuse of the format of the data files. Make sure all the sample names between the sampleinfo.txt and seqtab-nochimtaxa.txt are the same
+
+```{r}
+OTU = otu_table(count.tab, taxa_are_rows = TRUE) 
+TAX = tax_table(tax.tab)
+SAM = sample_data(sample.tab)
+ps = phyloseq(OTU,TAX,SAM) 
+```
+
+# Filter sequences
+
+We will filter out chloroplasts and mitochondria, because we only intended to amplify bacterial sequences. It's good to check you don’t have anything lurking in the taxonomy table. 
+
+```{r}
+sub_ps <- ps %>%
+  # subset_samples(Experiment == "ASH172") %>%  #use this function if you want to only include some subset of your sample set in the subsequent analysis
+  subset_taxa(Family  != "mitochondria" & Order  != "Chloroplast")
+```
+
+# Sample Summary
+
+As a first analysis, we will look at the distribution of read counts from our samples
+
+```{r echo = FALSE, warning = FALSE, message = FALSE, fig.height = 4, fig.width = 6, fig.align = "center"}
+# Make a data frame with a column for the read counts of each sample
+sample_sum_df <- data.frame(sum = sample_sums(sub_ps))
+# Histogram of sample read counts
+ggplot(sample_sum_df, aes(x = sum)) + 
+  geom_histogram(color = "black", fill = "#377EB8", binwidth = 2500) +
+  ggtitle("Distribution of sample sequencing depth") + 
+  xlab("Read counts") +
+  theme(axis.title.y = element_blank()) +
+  theme_classic2(base_size = 16)
+```
+
+```{r}
+# mean, max and min of sample read counts
+smin <- min(sample_sums(sub_ps)) 
+smean <- mean(sample_sums(sub_ps)) 
+smax <- max(sample_sums(sub_ps))
+```
+
+
+# Beta Diversity
+
+Beta diversity involves calculating metrics such as distances or dissimilarities based on pairwise comparisons of samples – they don’t exist for a single sample, but rather only as metrics that relate samples to each other. i.e. beta diversity = patterns in community structure between samples
+
+Since differences in sampling depths between samples can influence distance/dissimilarity metrics, we first need to somehow normalize the read depth across our samples.
+
+## Subsample
+
+We will rarefy (random subsample with replacement) the read depth of the samples first (scale to the smallest library size).
+
+[Case for not subsampling]( https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1003531)
+
+[Response blog for subsampling](https://www.polarmicrobes.org/how-i-learned-to-stop-worrying-and-love-subsampling-rarifying/)
+
+Read depth is an artifact of a machine made by a company in San Diego, not anything about your samples or their biology. It is totally artifactual, and controlling for artifacts is critical in science. Subsampling randomly is the simplest way to control for this, and the question is whether this is the "best" way of controlling for it. See links above for alternative arguments about what the best way of controlling for this artifact is. 
+
+A strong reason to subsample is to standardize effort. The bottom line is that in all experimental design you should not be comparing things to which you devote different effort in resolution. For instance, you don't sample one site once a week and another once a month if you want to compare the dynamics between the sites. You standardize effort.
+
+With that said, the bigger your differential in mean (or median) read depth (reads/sample) between pre- and post-subsampling, the greater the "effect" on beta diversity. 
+
+Examples:
+
+- means reads before = 40k, mean reads after = 1k, big effect.
+- mean reads before = 40k, mean reads after = 20k, small effect.
+- mean reads before = 2k, mean reads after = 1k, small effect.
+
+
+We will subsample to the minimum read depth of all samples and not subsample. We'll then compare the mean reads pre- and post-subsampling and also compare beta diversity patterns
+
+```{r}
+ps_min <-  rarefy_even_depth(sub_ps, sample.size = smin, rngseed = 532898)
+
+mean(sample_sums(sub_ps)) #20863
+mean(sample_sums(ps_min)) #6100 this is also the same as min(sample_sums(sub)ps) 
+```
+
+## NMDS
+
+One of the best exploratory analyses for amplicon data is unconstrained ordinations. Here we will look at non-metric multidimensional scaling (NMDS) ordinations of our full community samples. For NMDS plots it’s important to set a seed since the starting positions of samples in the alogrithm is random.
+
+```{r}
+set.seed(1)
+# Ordinate
+nmds <- ordinate(sub_ps, method = "NMDS",  distance = "bray") # stress = 0.09
+```
+
+```{r}
+set.seed(1)
+# Ordinate
+nmds_min <- ordinate(ps_min, method = "NMDS",  distance = "bray") # stress = 0.04
+```
+
+
+```{r echo = FALSE, warning = FALSE, message = FALSE, fig.height = 6, fig.width = 12, fig.align = "center"}
+levels <- c("Control", "Ash Leachate", "Mud Leachate", "UV-Mud Leachate", "Glucose_Nitrate_Phosphate", "San Diego", "Santa Barbara", "Campus Point", "Goleta Beach")
+
+nmds.plot <- plot_ordination(ps_min, nmds,  title = "NMDS") +
+  stat_ellipse(aes(group = interaction(Location), linetype = factor(Location)), type = "t") +
+  geom_point(aes(fill = days, shape = factor(Treatment, levels = levels), group = interaction(Experiment, Bottle, Timepoint)), alpha = 0.6, stroke = 2, size = 4) +
+  
+    # geom_point(aes(fill = Treatment, shape = factor(round(days)), group = interaction(Experiment, Bottle, Timepoint)), alpha = 0.6, stroke = 2, size = 4) +
+  
+  scale_shape_manual(values = c(21, 22, 23, 24)) +
+  scale_fill_viridis() +
+  theme_bw() 
+
+#removing one of the plotting layers (there are points within points)
+nmds.plot$layers <- nmds.plot$layers[-1]
+
+nmds.plot + 
+  # facet_grid(~Location) +
+  guides(fill = guide_colorbar(title = "Days", barheight = 8, barwidth = 2, frame.colour = "black", frame.linewidth = 2,ticks.colour = "black", ticks.linewidth = 1, reverse = T), shape = guide_legend(title = "Treatment"),  linetype = guide_legend(title = "Location")) 
+ # guides( shape = guide_legend(title = "Treatment"), color = F,  linetype = guide_legend(title = "Depth Horizon"), fill = guide_legend(title = "Days", override.aes = list(shape = 21))) 
+```
+
+
+NMDS plots attempt to show ordinal distances between samples as accurately as possible in two dimensions. It is important to report the stress of these plots, because a high stress value means that the algorithm had a hard time representing the distances between samples in 2 dimensions. The stress of this plot was good - it was .09 (generally anything below .2 is considered acceptable). 
+
+
+# Betadisper and permutational ANOVA
+
+Above, we performed beta diversity analyses on Bray-Curtis distances on
+rarefied datasets that were then visualized using NMDS.
+We can test if there are statistically significant differences between
+sample groups using the betadisper and adonis functions of the vegan
+package. Betadisper tests whether two or more groups are homogeneously
+dispersed in relation to their species in studied samples. This test can be done to see if one group has more compositional variance than
+another. Moreover, homogeneity of dispersion among groups is very
+advisable to have if you want to test if two or more groups have
+different compositions, which is tested by adonis.
+
+## Phyloseq to DESeq, distance matrix
+
+To be able to run the stats, we first have to create a distance matrix
+from our data. We’ll use the DESeq package to do so.
+
+```{r message=FALSE, warning=FALSE}
+library(DESeq2)
+library(vegan)
+```
+
+```{r}
+deseq_counts <- phyloseq_to_deseq2(ps_min, design = ~Location ) #the design argument is required but doesn't matter here
+```
+
+```{r}
+deseq_count_tab <- assay(deseq_counts) #extract the read count matrix
+```
+
+We’ll calculate bray-curtis distances, which reflect the NMDS ordinations above
+
+```{r}
+#We can subset our data if we want to and calculate distances/run stats for only a subset of the group. The code below shows how
+
+ash1_sample.tab <- sample.tab %>%
+  rownames_to_column() %>% 
+  filter(Experiment %in% c("ASH171")) %>% 
+  column_to_rownames(var = "rowname")
+
+
+subset_sample_IDs_ash1 <-  row.names(ash1_sample.tab)
+
+dist_ash1 <- vegdist(t(deseq_count_tab[ , colnames(deseq_count_tab) %in% subset_sample_IDs_ash1]), method = "bray")
+
+sample_info_tab_ash1 <- ash1_sample.tab[row.names(ash1_sample.tab) %in% subset_sample_IDs_ash1, ]
+
+####
+
+ash2_sample.tab <- sample.tab %>%
+  rownames_to_column() %>% 
+  filter(Experiment %in% c("ASH172")) %>% 
+  column_to_rownames(var = "rowname")
+
+
+subset_sample_IDs_ash2 <-  row.names(ash2_sample.tab)
+
+dist_ash2 <- vegdist(t(deseq_count_tab[ , colnames(deseq_count_tab) %in% subset_sample_IDs_ash2]), method = "bray")
+
+sample_info_tab_ash2 <- ash2_sample.tab[row.names(ash2_sample.tab) %in% subset_sample_IDs_ash2, ]
+
+####
+
+lab_sample.tab <- sample.tab %>%
+  rownames_to_column() %>% 
+  filter(Experiment %in% c("144L_2018")) %>% 
+  filter(!Bottle == "B" | !days == 0) %>% 
+  column_to_rownames(var = "rowname")
+
+
+subset_sample_IDs_lab <-  row.names(lab_sample.tab)
+
+dist_lab <- vegdist(t(deseq_count_tab[ , colnames(deseq_count_tab) %in% subset_sample_IDs_lab]), method = "bray")
+
+sample_info_tab_lab <- lab_sample.tab[row.names(lab_sample.tab) %in% subset_sample_IDs_lab, ]
+
+
+```
+
+Betadisper first calculates the average distance of group members to the group centroid in multivariate space (generated by a distance matrix).
+
+In the function below: we are using the distance matrix to calculate the multivariate dispersions (variances; average distance to centroids). We then use group dispersions to perform an ANOVA test.
+
+
+```{r}
+anova(betadisper(dist_ash1, sample_info_tab_ash1$days)) 
+```
+
+The ANOVA’s p-value is significant meaning that group dispersions are not homogenous (“Null hypothesis of no difference in dispersion between groups”)
+
+```{r}
+anova(betadisper(dist_ash2, sample_info_tab_ash2$days)) 
+```
+
+```{r}
+anova(betadisper(dist_lab, sample_info_tab_lab$days)) 
+```
+
+**Our groups for the 144L exp (days) do present homogeneity among group dispersions (compositions vary similarly). 
+
+```{r}
+adonis(dist_lab~sample_info_tab_lab$days)
+```
+
+Adonis analyzes and partitions sums of squares using distance matrices. It can be seen as an ANOVA using distance matrices (analogous to MANOVA – multivariate analysis of variance). Therefore, it is used to test if two or more groups have similar compositions.
+
+**Our groups (days) for the 144L exp present homogeneity among group dispersions (compositions vary similarly) and  have significantly different compositions. 
+
+
+# Alpha Diversity
+
+We are going to calculate the the Chao1 diversity index. 
+
+**it is important to note that the alpha diversity values are not interpretable as “real” numbers of anything (due to the nature of amplicon data), but they can still be useful as relative metrics of comparison.**
+
+[Chao1: nonparametric estimation of minimum community richness](https://www.jstor.org/stable/4615964?seq=1#metadata_info_tab_contents) 
+
+
+```{r}
+richness <- estimate_richness(ps_min, measures = c("Chao1", "Shannon")) %>% 
+  rownames_to_column(., var = "DNA_ID") %>% 
+  mutate_at(vars(DNA_ID), str_replace_all, pattern = "171.", "171-") %>% 
+   mutate_at(vars(DNA_ID), str_replace_all, pattern = "172.", "172-") %>% 
+   mutate_at(vars(DNA_ID), str_replace_all, pattern = "X", "")
+```
+
+Let’s add the sample metadata into this dataframe 
+
+```{r}
+alphadiv <- left_join(richness, sample.tab %>% rownames_to_column(., var = "DNA_ID")) 
+```
+
+
+```{r echo = FALSE, warning = FALSE, message = FALSE, fig.height = 6, fig.width = 12, fig.align = "center"}
+
+levels <- c("Control", "Ash Leachate", "Mud Leachate", "UV-Mud Leachate", "Glucose_Nitrate_Phosphate", "San Diego", "Santa Barbara", "Campus Point", "Goleta")
+
+alpha.plot.data <- alphadiv %>% 
+  mutate(days = round(days))
+  
+ alpha.plot <-  alpha.plot.data %>% 
+   ggplot(aes(x = factor(days), y = Chao1)) +
+   geom_boxplot(width = 0.3, outlier.shape = NA) +
+   geom_point(aes(fill = factor(Treatment, levels = levels), group = interaction(Experiment, Treatment)), shape = 21, size = 3, alpha = 0.7) +
+  scale_color_viridis_d(option = "viridis", direction = -1) +
+  scale_fill_viridis_d(option = "viridis", direction = -1) +
+  theme_classic2(base_size = 16) +
+  labs(x = "", y =  "Chao1", fill = "Days") + 
+  # stat_compare_means(method = "t.test")  +
+  # stat_compare_means(comparisons = my_comparisons,
+  #                    label = "p.adj",
+  #                    step.increase = 0.11,
+  #                    tip.length = 0.01) +
+   stat_compare_means(vjust = 1) +
+  facet_grid(factor(Location, levels = levels)~factor(Treatment, levels = levels), scales = "free") +
+   # ylim(250, 850) +
+   # ggtitle("NAAMES 2 Station 4 (N2S4)") +
+   guides(colour = guide_colorbar(reverse = T),
+         fill = guide_colorbar(reverse = T)) ; alpha.plot
+```
+
+Boxes represent the 1.5 interquartile range, with the internal solid line representing the median. Circles represent data points. p-values are reported  the non-parametric two sample Wilcoxon test, which tests whether the means between two groups are equal (ns: p > 0.05, * : p≤ 0.05, ** : p ≤ 0.01).
+
+Difference in the alpha diversity index among conditions were tested using pairwise Wilcoxon or Kruskal-Wallis tests; p < 0.05 was considered the threshold significance for a difference between conditions.
+
+
+
+# Who??
+
+Which taxa were important? Which taxa were contributing to the change in community compositon?
+
+**Note: Recovered 16S rRNA gene copy numbers do not equal organism abundance.**
+
+That said, we can generate a heat map of our samples showing us how the relative abundance of different taxonomic groups change...potentially giving us a visual of which taxa are most important to the alpha and beta diversity patterns we observed. 
+First, we're going to generate a custom table that will be easier to work with than a phyloseq object.
+
+## Generate relative abundances
+
+Our data currently shows number gene copies recovered, so we'll convert to percentages (relative abundances)
+
+```{r}
+ps_std <- transform_sample_counts(ps_min, function(x) x/sum(x))
+#extract the relative abundance table and coerce into dataframe
+ps_std.tab <- as(otu_table(ps_std), "matrix")
+ps_std.df = as.data.frame(ps_std.tab) 
+```
+
+## Make table
+
+```{r warning = F}
+#first coerce the taxa table into a data frame
+tax.df <-  as.data.frame(tax.tab) 
+#then combine the data frames
+custom.tab <- tax.df %>% 
+  rownames_to_column(., var = "asv") %>% 
+  left_join(., ps_std.df %>% rownames_to_column(., var = "asv")) %>% 
+  #create a new index of that combines the  class, order, family, and genus values, you can play around here!!
+  mutate(pcof = paste(Phylum, "_", Class, "_", Order,"_", Family)) %>% 
+         # pco = paste(Phylum, "_", Class, "_", Order)) %>% 
+  select(-c(asv:Genus)) %>% 
+  select(pcof,everything()) %>%
+  group_by(pcof) %>%
+  # select(pco,everything()) %>% 
+  # group_by(pco) %>% 
+  #here we are combining the relative abundances based on our grouping
+  summarise_at(vars(contains(c("ASH171", "ASH172", "144"))), sum, na.rm = T) %>% 
+  ungroup()
+
+#save the row names and then make them into the column names
+colnames <- custom.tab[,1] 
+
+#transpose the dataframe so we can merge with the sample info table
+t_custom.tab <-  as.data.frame(t(custom.tab[,-1]))
+colnames(t_custom.tab) <- colnames$pcof
+# colnames(t_custom.tab) <- colnames$pco
+
+#merge
+sweet.tab <- t_custom.tab %>% 
+  rownames_to_column(., var = "sample") %>% 
+  left_join(., sample.tab %>% rownames_to_column(., var = "sample") %>% select(sample, everything())) %>% 
+  select(sample, Experiment:sd_PTOC, everything())
+
+
+relabund <- sweet.tab %>% 
+  select(-c(sample:sd_PTOC)) %>% 
+  #remove groups that are completely absent
+  .[ , colSums(.) > 0] %>% 
+  #arrange by biggest contributors
+  .[, order(colSums(-.))] %>% 
+  bind_cols(sweet.tab %>% select(sample:sd_PTOC), .)
+```
+
+
+## Heatmaps
+
+```{r echo = FALSE, warning = FALSE, message = FALSE, fig.height = 14, fig.width = 14, fig.align = "center"}
+relaheat.data <- relabund %>% 
+  select(-c(sample:Experiment, Temperature_C:Depth, Target_DOC_Amendment_uM:hours, sd_cells:sd_PTOC)) %>%
+  pivot_longer(.,-c(Location:cells), names_to = "taxa", values_to = "relabund") %>% 
+  separate(taxa, into = c("p", "c", "o", "f"), sep = " _ ") %>% 
+  mutate(cof = paste(c, o, f, sep = ": ")) %>% 
+  mutate(absabund = relabund * cells) %>% 
+  group_by(Location, Treatment, Timepoint, cof) %>% 
+  mutate(mean_relabund = mean(relabund, na.rm = T),
+         sd_relabund = sd(relabund, na.rm = T),
+         mean_absabund = mean(absabund, na.rm = T), 
+         sd_absabund = sd(absabund, na.rm = T)) %>% 
+  ungroup() %>% 
+  mutate_at(vars(p,c,o, cof), str_replace_all, "NA", "Unassigned") %>% 
+  arrange(desc(cof), mean_relabund)
+
+sd_relaheat_cof <- relaheat.data %>%
+  filter(Location == "San Diego") %>% 
+  select(Location, Treatment, days, cof, contains(c("mean","sd"))) %>% 
+  distinct() %>% 
+  filter(mean_relabund > 0.001) %>%
+  ggplot(aes(x = as.character(round(days)), y = reorder(cof, mean_relabund), group = interaction(Treatment, days))) +
+  geom_tile(aes(fill = mean_relabund), color = "white") +
+  scale_fill_viridis(option = "D", begin = 0.01) +
+  geom_text(aes(label = round(mean_relabund, 3)), color = "white", size = 4) +
+  labs(x = "Days", y = "Class: Order: Family", fill = "Relative Abundance") +
+  facet_grid(~factor(Treatment, levels = levels)) +
+  theme_classic2(base_size = 16) +
+  theme(axis.text.y = element_text(size = 12), legend.position = "top") +
+   guides(fill = guide_colourbar(barheight = 2, barwidth = 20, frame.colour = "black", frame.linewidth = 2,ticks.colour = "black", ticks.linewidth = 1), color = F) +
+  ggtitle("San Diego")
+```
+
+```{r fig.height=14, fig.width=14}
+sb_relaheat_cof <- relaheat.data %>%
+  filter(Location == "Santa Barbara") %>% 
+  select(Location, Treatment, days, cof, contains(c("mean","sd"))) %>% 
+  distinct() %>% 
+  filter(mean_relabund > 0.001) %>%
+  ggplot(aes(x = as.character(round(days)), y = reorder(cof, mean_relabund), group = interaction(Treatment, days))) +
+  geom_tile(aes(fill = mean_relabund), color = "white") +
+  scale_fill_viridis(option = "D", begin = 0.01) +
+    geom_text(aes(label = round(mean_relabund, 3)), color = "white", size = 4) +
+  labs(x = "Days", y = "Class: Order: Family", fill = "Relative Abundance") +
+  facet_grid(~factor(Treatment, levels = levels)) +
+  theme_classic2(base_size = 16) +
+  theme(axis.text.y = element_text(size = 12), legend.position = "top") +
+   guides(fill = guide_colourbar(barheight = 2, barwidth = 20, frame.colour = "black", frame.linewidth = 2,ticks.colour = "black", ticks.linewidth = 1), color = F) +
+  ggtitle("Santa Barbara")
+```
+
+```{r fig.height=14, fig.width=16}
+cp_relaheat_cof <- relaheat.data %>%
+  filter(Location == "Campus Point") %>% 
+  select(Location, Treatment, days, cof, contains(c("mean","sd"))) %>% 
+  distinct() %>% 
+  filter(mean_relabund > 0.001) %>%
+  ggplot(aes(x = as.character(round(days)), y = reorder(cof, mean_relabund), group = interaction(Treatment, days))) +
+  geom_tile(aes(fill = mean_relabund), color = "white") +
+  scale_fill_viridis(option = "D", begin = 0.01) +
+    geom_text(aes(label = round(mean_relabund, 3)), color = "white", size = 4) +
+  labs(x = "Days", y = "Class: Order: Family", fill = "Relative Abundance") +
+  facet_grid(~factor(Treatment, levels = levels)) +
+  theme_classic2(base_size = 16) +
+  theme(axis.text.y = element_text(size = 12), legend.position = "top") +
+   guides(fill = guide_colourbar(barheight = 2, barwidth = 20, frame.colour = "black", frame.linewidth = 2,ticks.colour = "black", ticks.linewidth = 1), color = F) +
+  ggtitle("Campus Point")
+```
+
+
+
+
+```{r fig.height=14, fig.width=14}
+sd_counts_cof <- relaheat.data %>%
+  filter(Location == "San Diego") %>% 
+  select(Location, Treatment, days, cof, contains(c("mean","sd"))) %>% 
+  distinct() %>% 
+  filter(mean_relabund > 0.001) %>%
+  ggplot(aes(x = as.character(round(days)), y = reorder(cof, mean_relabund), group = interaction(Treatment, days))) +
+  geom_tile(aes(fill = mean_absabund), color = "white") +
+  scale_fill_viridis(option = "D", trans = "log10") +
+  geom_text(aes(label = formatC(mean_absabund, format = "e", digits = 1)), color = "white", size = 4) +
+  labs(x = "Days", y = "", fill = expression(paste("Cells L"^-1))) +
+  facet_grid(~factor(Treatment, levels = levels)) +
+  theme_classic2(base_size = 16) +
+  theme(axis.text.y = element_text(size = 12), legend.position = "top") +
+   guides(fill = guide_colourbar(barheight = 2, barwidth = 20, frame.colour = "black", frame.linewidth = 2,ticks.colour = "black", ticks.linewidth = 1), color = F) +
+  ggtitle("San Diego") +
+  theme( legend.position = "top", axis.text.y = element_blank()) 
+```
+
+```{r fig.height=14, fig.width=14}
+sb_counts_cof <- relaheat.data %>%
+  filter(Location == "Santa Barbara") %>% 
+  select(Location, Treatment, days, cof, contains(c("mean","sd"))) %>% 
+  distinct() %>% 
+  filter(mean_relabund > 0.001) %>%
+  ggplot(aes(x = as.character(round(days)), y = reorder(cof, mean_relabund), group = interaction(Treatment, days))) +
+  geom_tile(aes(fill = mean_absabund), color = "white") +
+  scale_fill_viridis(option = "D", trans = "log10") +
+  geom_text(aes(label = formatC(mean_absabund, format = "e", digits = 1)), color = "white", size = 4) +
+  labs(x = "Days", y = "", fill = expression(paste("Cells L"^-1))) +
+  facet_grid(~factor(Treatment, levels = levels)) +
+  theme_classic2(base_size = 16) +
+  theme(axis.text.y = element_text(size = 12), legend.position = "top") +
+   guides(fill = guide_colourbar(barheight = 2, barwidth = 20, frame.colour = "black", frame.linewidth = 2,ticks.colour = "black", ticks.linewidth = 1), color = F) +
+  ggtitle("Santa Barbara") +
+  theme( legend.position = "top", axis.text.y = element_blank())
+```
+
+```{r fig.height=14, fig.width=16}
+cp_counts_cof <- relaheat.data %>%
+  filter(Location == "Campus Point") %>% 
+  select(Location, Treatment, days, cof, contains(c("mean","sd"))) %>% 
+  distinct() %>% 
+  filter(mean_relabund > 0.001) %>%
+  ggplot(aes(x = as.character(round(days)), y = reorder(cof, mean_relabund), group = interaction(Treatment, days))) +
+  geom_tile(aes(fill = mean_absabund), color = "white") +
+  scale_fill_viridis(option = "D", trans = "log10") +
+  geom_text(aes(label = formatC(mean_absabund, format = "e", digits = 1)), color = "white", size = 4) +
+  labs(x = "Days", y = "", fill = expression(paste("Cells L"^-1))) +
+  facet_grid(~factor(Treatment, levels = levels)) +
+  theme_classic2(base_size = 16) +
+  theme(axis.text.y = element_text(size = 12), legend.position = "top") +
+   guides(fill = guide_colourbar(barheight = 2, barwidth = 20, frame.colour = "black", frame.linewidth = 2,ticks.colour = "black", ticks.linewidth = 1), color = F) +
+  ggtitle("Campus Point") + 
+  theme( legend.position = "top", axis.text.y = element_blank())
+```
+
+```{r}
+library(patchwork)
+```
+
+```{r fig.height=14, fig.width=20}
+(sd_relaheat_cof + ggtitle("")) + (sd_counts_cof + ggtitle("")) + plot_annotation(title = 'San Diego', tag_levels = 'A', theme = theme(plot.title = element_text(size = 28), plot.tag = element_text(size = 18)))
+```
+
+```{r fig.height=14, fig.width=20}
+(sb_relaheat_cof + ggtitle("")) + (sb_counts_cof + ggtitle("")) + plot_annotation(title = 'Santa Barbara', tag_levels = 'A', theme = theme(plot.title = element_text(size = 28), plot.tag = element_text(size = 18)))
+```
+
+```{r fig.height=14, fig.width=28}
+(cp_relaheat_cof + ggtitle("")) + (cp_counts_cof + ggtitle("")) + plot_annotation(title = 'Campus Point', tag_levels = 'A', theme = theme(plot.title = element_text(size = 28), plot.tag = element_text(size = 18)))
+```
+
+
+# Save and knit
+
+```{r}
+saveRDS(sweet.tab, "~/GITHUB/acidd_remins/output/Custom_ASV_Table.rds")
+saveRDS(sub_ps, "~/GITHUB/acidd_remins/output/phyloseq_obj.rds")
+saveRDS(ps_min, "~/GITHUB/acidd_remins/output/subsampled_phyloseq_obj.rds")
+saveRDS(alphadiv, "~/GITHUB/acidd_remins/output/alphadiv.rds")
+saveRDS(relaheat.data, "~/GITHUB/acidd_remins/output/heatmap_data.rds")
+
+
+```
+
+

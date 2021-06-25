@@ -1,0 +1,373 @@
+---
+title: "ACIDD_TOC"
+author: "Nicholas Baetge"
+date: "10/20/2020"
+output: github_document
+---
+
+# Intro
+
+This document shows how **individual bottle** TOC/DOC data from ACIDD remineralization experiments were processed, QC'd, and analyzed.
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(readxl)
+library(lubridate)
+```
+
+# Import Data
+
+```{r}
+excel_sheets("~/GITHUB/144l_students/Input_Data/week4/ACIDD_Exp_TOC.xlsx")
+
+metadata <- read_excel("~/GITHUB/144l_students/Input_Data/week4/ACIDD_Exp_TOC.xlsx", sheet = "Metadata")
+
+data <- read_excel("~/GITHUB/144l_students/Input_Data/week4/ACIDD_Exp_TOC.xlsx", sheet = "Data")
+
+```
+
+```{r}
+glimpse(metadata)
+```
+
+```{r}
+glimpse(data)
+```
+
+# Prepare data
+
+```{r warning=FALSE}
+joined <- left_join(metadata, data)
+
+toc <- joined %>% 
+  mutate(Datetime = ymd_hm(Datetime)) %>% 
+  group_by(Experiment, Bottle) %>% 
+  mutate(interv = interval(first(Datetime), Datetime),
+         hours = interv/3600, 
+         days = hours/24) %>% 
+  ungroup() %>% 
+  rename(sd_TOC = TOC_sd,
+         sd_PTOC = PTOC_sd) %>%
+  select(Experiment:Datetime, hours, days, everything(), -c(contains("Sample"), interv))
+
+```
+
+```{r}
+glimpse(toc)
+```
+
+# Plot the curves
+
+## Pivot data
+
+```{r}
+pivot_toc <- toc %>%
+  select(Experiment, Location, Bottle, Treatment, days, TOC, PTOC) %>% 
+  pivot_longer(TOC:PTOC, names_to = "sample", values_to = "value") 
+
+pivot_toc_sd <- toc %>% 
+  select(Experiment, Location, Bottle, Treatment, days, sd_TOC, sd_PTOC) %>%
+  pivot_longer(sd_TOC:sd_PTOC, names_to = "sample", names_prefix = "sd_", values_to = "sd") 
+
+pivoted <- left_join(pivot_toc, pivot_toc_sd) %>% 
+  mutate(sample = ifelse(sample == "TOC", "Bottle", "Vial"))
+
+glimpse(pivoted)
+
+```
+
+## Plot 
+
+```{r }
+custom.colors <- c("Control" = "#377EB8", "Ash Leachate" = "#4DAF4A", "Santa Barbara" = "#E41A1C", "San Diego" = "#FF7F00", "Vial" = "#377EB8", "Bottle" = "#E41A1C")
+levels <- c("Control", "Ash Leachate", "San Diego", "Santa Barbara", "Bottle", "Vial")
+
+pivoted %>% 
+  filter(Location == "Santa Barbara") %>% 
+  drop_na(value) %>% 
+  mutate(Treatment = factor(Treatment, levels = levels),
+         sample = factor(sample, levels = levels)) %>% 
+  ggplot(aes(x = days, y = value, group = interaction(Treatment, Bottle))) +
+  geom_errorbar(aes(ymin = value - sd, ymax = value + sd, color = sample), width = 0.4) +
+  geom_point(aes(fill = sample), size = 3, shape = 21, alpha = 0.7) +
+  scale_color_manual(values = custom.colors) +
+  scale_fill_manual(values = custom.colors) +
+  labs(x = "Days", y = expression("Total Organic Carbon, µmol C L"^-1), color = "", fill = "") +
+  theme_bw() +
+  facet_grid(rows = "Treatment", scales = "free") + 
+  guides(color = F)
+    
+
+```
+
+The analytical detection limit for our TOC analysis is ~1.5 µmol C L^-1^.
+
+# TOC v PTOC (bottle v vial samples) 
+
+```{r}
+# install.packages("lmodel2")
+library(lmodel2)
+
+reg.data <- toc %>%
+  drop_na(TOC) %>% 
+  filter(Timepoint > 0)
+
+
+reg <- lmodel2(PTOC ~ TOC, data = reg.data, nperm = 99)
+  
+```
+
+
+```{r}
+reg
+```
+
+```{r}
+intercept <- reg$regression.results[3, 2]
+slope <- reg$regression.results[3, 3]
+
+two_int <- reg$confidence.intervals[3, 2] 
+two_slope <- reg$confidence.intervals[3, 4]
+nine_int <- reg$confidence.intervals[3, 3]
+nine_slope <- reg$confidence.intervals[3, 5]
+
+```
+
+```{r fig.height=4, fig.width=5}
+
+reg.data %>% 
+  ggplot(aes(x = TOC, y = PTOC)) +
+  geom_errorbar(aes(ymin = PTOC - sd_PTOC, ymax = PTOC + sd_PTOC), width = 0.05) +
+  # geom_errorbarh(aes(xmin = TOC - sd_TOC, xmax = PTOC + sd_PTOC), width = 0.05) +
+  geom_point(fill = "white", shape = 21, size = 4, alpha = 0.7) +
+  geom_abline(intercept = intercept, slope = slope, linetype = 2, size = 1) +
+  geom_abline(intercept = two_int, slope = two_slope, color = "black", linetype = 3, size = 1) +
+  geom_abline(intercept = nine_int, slope = nine_slope, color = "black", linetype = 3, size = 1) +
+  labs(x = expression("Bottle TOC, µmol C L"^-1), y = expression("Vial TOC, µmol C L"^-1)) +
+  theme_bw() +
+  annotate( geom = "text", label = expression(atop("y = 0.72x + 19.8", paste("r"^2," = 0.97, ", italic("p "), "= 0.01"))), x = 70, y = 74, size = 4) 
+
+
+```
+
+```{r}
+bc <- read_rds("~/GITHUB/144l_students/Output_Data/week3/ACIDD_Exp_Processed_BactAbund.rds")
+
+merge <- left_join(toc, bc) %>% 
+  select(Experiment:days, TOC:sd_PTOC, cells:diff_ln_cells, bc, ave_bc, sd_bc, everything(), -c(contains("Sample")) ) %>% 
+  group_by(Experiment, Treatment, Bottle) %>% 
+  fill(exp_start:sd_lag) %>% 
+  ungroup()
+
+glimpse(merge)
+
+subset <- merge %>% 
+  select(Experiment, Treatment, Bottle, days, PTOC, bc)
+
+```
+
+# Interpolate 
+
+```{r}
+# install.packages("zoo")
+library(zoo)
+```
+
+We only want to interpolate within an experiment and not across experiments, so we'll perform the interpolation by using the split-apply-combine strategy. 
+
+- split the dataframe into a list of its elements (in this case, experiments and bottles)
+- apply the interpolation function to each of the list elements
+- combine the results into a new dataframe
+
+## Split
+
+```{r}
+to_interpolate <- merge %>% 
+  select(Experiment, Bottle, Timepoint, days, PTOC, bc) %>% 
+  group_by(Experiment, Bottle) # first we'll define the grouping of our dataframe
+
+list <- to_interpolate %>% 
+  group_split()  #then we can convert the dataframe into a list, broken up by the groups (list elements)
+
+keys <- to_interpolate %>% 
+  group_keys() %>%
+  mutate(key = paste(Experiment, Bottle))
+
+names(list) <- keys$key
+
+```
+
+## Write the function
+
+```{r}
+interp.func <- function(x) {
+  y <- zoo(x, order.by = x$days) # orders our observations
+  interp_toc <- round(as.numeric(na.approx(y$PTOC, na.rm = F)), 1) # interpolates toc
+  interp_bc <- round(as.numeric(na.approx(y$bc, na.rm = F)), 1)
+  z <- cbind(y, interp_toc, interp_bc) #combines the columns
+  as_tibble(z) #convert to dataframe
+}
+```
+
+## Apply and Combine
+
+```{r}
+interpolated <- lapply(list, interp.func) %>% 
+  plyr::ldply(., as.data.frame) %>% 
+  select(-c(.id, PTOC, bc, days)) %>% 
+  mutate_at(vars(Timepoint:interp_bc), as.numeric) %>% 
+  left_join(merge, .)
+  
+```
+```{r}
+glimpse(interpolated)
+```
+
+# Estimate DOC, Bioavailability, BGEs 
+
+```{r}
+doc <- interpolated %>% 
+  mutate(doc = interp_toc - interp_bc) %>% 
+  group_by(Experiment, Bottle) %>% 
+  mutate(bioav_doc = (first(doc) - last(na.omit(doc))) / first(doc), 
+         doc_exp_end = ifelse(Timepoint == exp_end, doc, NA),
+         delta_doc = first(doc) - doc_exp_end, 
+         tdelta_doc = first(doc) - last(na.omit(doc)),
+         bge = ifelse(delta_doc > 1.5, delta_bc/delta_doc, NA)) %>% 
+  fill(doc_exp_end:bge, .direction = "downup") %>% 
+  ungroup()
+
+glimpse(doc)
+```
+
+# Treatment averages
+
+```{r}
+averages <- doc %>% 
+  group_by(Experiment, Treatment, Timepoint) %>% 
+  mutate(ave_toc = mean(PTOC),
+         sd_toc = sd(PTOC)) %>% 
+  ungroup() %>% 
+  group_by(Experiment, Treatment) %>% 
+  mutate(ave_bioav_doc = mean(bioav_doc),
+         sd_bioav_doc = sd(bioav_doc),
+         ave_delta_doc = mean(delta_doc),
+         sd_delta_doc = sd(delta_doc),
+         ave_tdelta_doc = mean(tdelta_doc),
+         sd_tdelta_doc = sd(tdelta_doc),
+         ave_bge = mean(bge),
+         sd_bge = sd(bge)) %>% 
+  ungroup()
+  
+```
+
+```{r}
+subset <- averages %>% 
+  filter(Experiment == "ASH172") %>% 
+  select(Experiment, Treatment, Bottle, Timepoint, PTOC, ave_toc:sd_bge)
+
+glimpse(subset)
+```
+
+# Plot treatment curves (TOC)
+
+```{r fig.height=4, fig.width=6}
+averages %>% 
+  filter(Location == "Santa Barbara") %>% 
+  mutate(Treatment = factor(Treatment, levels = levels)) %>% 
+  drop_na(ave_toc) %>% 
+  ggplot(aes(x = days, y = ave_toc, group = interaction(Experiment, Treatment))) +
+  geom_errorbar(aes(ymin = ave_toc - sd_toc, ymax = ave_toc + sd_toc, color = Treatment), width = 0.4) +
+  geom_point(aes(fill = Treatment), size = 3, shape = 21, alpha = 0.7) +
+  geom_line(aes(color = Treatment), size = 1, alpha = 0.7) +
+  scale_color_manual(values = custom.colors) +
+  scale_fill_manual(values = custom.colors) +
+  labs(x = "Days", y = expression("Total Organic Carbon, µmol C L"^-1), color = "", fill = "") +
+  theme_bw() +
+ # facet_grid(rows = "Treatment", scales = "free") + 
+  guides(color = F)
+
+```
+
+# Plot treatment averages (bars)
+
+
+```{r}
+bar.data <- averages %>% 
+  select(Location, Treatment, ave_bioav_doc:sd_bge) %>% 
+  distinct() %>% 
+  filter(Location == "Santa Barbara")
+  
+```
+
+```{r}
+bioav <- bar.data %>% 
+ggplot(aes(x = factor(Treatment, levels = levels), y =  ave_bioav_doc, group = interaction(Location, Treatment)))  + 
+  geom_col( color = "black", fill = "white", alpha = 1) +
+  geom_errorbar(aes(ymin = ave_bioav_doc - sd_bioav_doc, ymax = ave_bioav_doc + sd_bioav_doc), width = 0.1, size = 0.5) +
+  labs(x = "", y = expression(paste("Bioavailable DOC Fraction")), color = "") +
+  theme_bw() 
+  #facet_grid(~factor(Location, levels = levels), scales = "free") 
+```
+
+```{r}
+deldoc <- bar.data %>% 
+ggplot(aes(x = factor(Treatment, levels = levels), y =  ave_delta_doc, group = interaction(Location, Treatment)))  + 
+  geom_col(color = "black", fill = "white", alpha = 1) +
+  geom_errorbar(aes(ymin = ave_delta_doc - sd_delta_doc, ymax = ave_delta_doc + sd_delta_doc), width = 0.1, size = 0.5) +
+  labs(x = "", y = expression(paste("∆ DOC (to stationary), µmol C L"^-1)), color = "") +
+  theme_bw() +
+  #facet_grid(~factor(Location, levels = levels), scales = "free") +
+  guides(fill = F) 
+```
+
+```{r}
+total_deldoc <- bar.data %>% 
+ggplot(aes(x = factor(Treatment, levels = levels), y =  ave_tdelta_doc, group = interaction(Location, Treatment)))  + 
+  geom_col(color = "black", fill = "white", alpha = 1) +
+  geom_errorbar(aes(ymin = ave_tdelta_doc - sd_tdelta_doc, ymax = ave_tdelta_doc + sd_tdelta_doc), width = 0.1, size = 0.5) +
+  labs(x = "", y = expression(paste("∆ DOC (total), µmol C L"^-1)), color = "") +
+  theme_bw() +
+  #facet_grid(~factor(Location, levels = levels), scales = "free") +
+  guides(fill = F) 
+```
+
+
+```{r}
+bge <- bar.data %>% 
+ggplot(aes(x = factor(Treatment, levels = levels), y =  ave_bge, group = interaction(Location, Treatment)))  + 
+  geom_col(color = "black", fill = "white", alpha = 1) +
+  geom_errorbar(aes(ymin = ave_bge - sd_bge, ymax = ave_bge + sd_bge), width = 0.1, size = 0.5) +
+  labs(x = "", y = expression(paste("Bacterial Growth Efficiency")), color = "") +
+  theme_bw() +
+  #facet_grid(~factor(Location, levels = levels), scales = "free") +
+  guides(fill = F) 
+```
+
+```{r}
+library(patchwork)
+```
+
+```{r fig.height=10, fig.width=4}
+deldoc / total_deldoc / bioav / bge + plot_annotation(title = "Santa Barbara Experiments", tag_levels = "a")
+```
+
+# Save data 
+
+```{r}
+saveRDS(averages, "~/GITHUB/144l_students/Output_Data/week4/ACIDD_Exp_Processed_DOC_BGE.rds")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
